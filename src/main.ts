@@ -11,7 +11,7 @@
  * Mirrors the main.ts pattern from pod-github / pod-calendar.
  */
 
-import Fastify from 'fastify'
+import Fastify, { type FastifyBaseLogger } from 'fastify'
 import { loadConfig } from './config.js'
 import { HulyClient } from './huly/client.js'
 import { OneDevClient } from './onedev/client.js'
@@ -24,15 +24,15 @@ import type {
   OneDevPullRequestEvent,
 } from './onedev/types.js'
 
-async function main(): Promise<void> {
+async function main (): Promise<void> {
   const config = loadConfig()
 
   const fastify = Fastify({ logger: true })
   const huly = new HulyClient()
   const mappings = new MappingStore()
 
-  // OneDev client is configured per-workspace in practice;
-  // this default instance is for dev/testing.
+  // OneDev client factory — creates per-project clients using stored project config.
+  // The default instance below is for health checks; per-event clients come from mappings.
   const onedev = new OneDevClient({
     baseUrl: process.env.ONEDEV_BASE_URL ?? 'http://localhost:6610',
     accessToken: process.env.ONEDEV_ACCESS_TOKEN ?? '',
@@ -62,27 +62,22 @@ async function main(): Promise<void> {
       verifyWebhook(request, config.onedevWebhookSecret)
     } catch (err) {
       if (err instanceof WebhookVerificationError) {
-        fastify.log.warn({ msg: 'Rejected webhook', reason: err.message })
-        return reply.code(401).send({ error: err.message })
+        fastify.log.warn({ msg: 'Rejected webhook', reason: (err as Error).message })
+        return reply.code(401).send({ error: (err as Error).message })
       }
       throw err
     }
 
     const envelope = parseWebhook(request.body)
     if (envelope === null) {
-      // Unknown or unhandled event — acknowledge and ignore
       return reply.code(200).send({ status: 'ignored' })
     }
 
-    // Acknowledge immediately; process asynchronously
-    // Per NFR-2.1: webhook endpoint must return 200 quickly
-    reply.code(200).send({ status: 'accepted' })
+    // Acknowledge immediately; process asynchronously (NFR-2.1)
+    void reply.code(200).send({ status: 'accepted' })
 
-    // Process in background
     handleWebhookEvent(envelope.event, envelope.data, { huly, onedev, mappings, config, log: fastify.log })
       .catch((err) => fastify.log.error({ msg: 'Webhook processing failed', event: envelope.event, err }))
-
-    return reply
   })
 
   // ---------------------------------------------------------------------------
@@ -116,8 +111,8 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => { void shutdown() })
+  process.on('SIGINT', () => { void shutdown() })
 }
 
 // ---------------------------------------------------------------------------
@@ -129,10 +124,10 @@ interface HandlerContext {
   onedev: OneDevClient
   mappings: MappingStore
   config: ReturnType<typeof loadConfig>
-  log: ReturnType<typeof Fastify>['log']
+  log: FastifyBaseLogger
 }
 
-async function handleWebhookEvent(
+async function handleWebhookEvent (
   event: string,
   data: unknown,
   ctx: HandlerContext,
@@ -161,57 +156,141 @@ async function handleWebhookEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Individual event handlers — stubs to be implemented
+// Issue handlers
 // ---------------------------------------------------------------------------
 
-async function handleIssueOpened(data: OneDevIssueEvent, ctx: HandlerContext): Promise<void> {
+async function handleIssueOpened (data: OneDevIssueEvent, ctx: HandlerContext): Promise<void> {
   const { issue } = data
-  ctx.log.info({ msg: 'Issue opened', project: issue.project.path, number: issue.number })
-  // TODO: check if project is mapped, create Huly issue, store mapping
+
+  const projectConfig = ctx.mappings.getProjectConfig(issue.project.path)
+  if (projectConfig === undefined) {
+    ctx.log.debug({ msg: 'No project mapping', path: issue.project.path })
+    return
+  }
+
+  // Idempotency: skip if already mapped (e.g. duplicate delivery)
+  if (ctx.mappings.getIssueByOneDev(issue.project.path, issue.number) !== undefined) {
+    ctx.log.debug({ msg: 'Issue already mapped', project: issue.project.path, number: issue.number })
+    return
+  }
+
+  const onedevUrl = `${projectConfig.onedevBaseUrl}/${issue.project.path}/issues/${issue.number}`
+
+  const hulyIssueId = await ctx.huly.createIssue({
+    workspaceId: projectConfig.hulyWorkspace,
+    projectId: projectConfig.hulyProjectId,
+    title: issue.title,
+    description: issue.description,
+    externalUrl: onedevUrl,
+  })
+
+  ctx.mappings.setIssue({
+    onedevProjectPath: issue.project.path,
+    onedevIssueNumber: issue.number,
+    onedevIssueId: issue.id,
+    hulyWorkspace: projectConfig.hulyWorkspace,
+    hulyProjectId: projectConfig.hulyProjectId,
+    hulyIssueId,
+  })
+
+  ctx.log.info({ msg: 'Created Huly issue', hulyIssueId, project: issue.project.path, number: issue.number })
 }
 
-async function handleIssueChanged(data: OneDevIssueEvent, ctx: HandlerContext): Promise<void> {
+async function handleIssueChanged (data: OneDevIssueEvent, ctx: HandlerContext): Promise<void> {
   const { issue } = data
+
   const mapping = ctx.mappings.getIssueByOneDev(issue.project.path, issue.number)
   if (mapping === undefined) return
 
-  ctx.log.info({ msg: 'Issue changed', project: issue.project.path, number: issue.number })
-  // TODO: update Huly issue title/description/status
+  const update: { title?: string; description?: string; status?: string } = {
+    title: issue.title,
+    description: issue.description,
+  }
+
+  // Resolve state → Huly status if the mapping has a rule for it
+  const hulyStatusId = ctx.mappings.resolveHulyStatus(issue.project.path, issue.state)
+  if (hulyStatusId !== undefined) {
+    update.status = hulyStatusId
+  }
+
+  await ctx.huly.updateIssue(mapping.hulyWorkspace, mapping.hulyIssueId, update)
+  ctx.log.info({ msg: 'Updated Huly issue', hulyIssueId: mapping.hulyIssueId, state: issue.state })
 }
 
-async function handleIssueCommentCreated(data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
+// ---------------------------------------------------------------------------
+// Comment handlers
+// ---------------------------------------------------------------------------
+
+async function handleIssueCommentCreated (data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
   const { issue, comment } = data
-  // Skip comments that we posted to avoid sync loops
+
+  // Skip our own comments to avoid sync loops (FR-2.6)
   if (comment.content.includes('<!-- pod-onedev -->')) return
 
   const mapping = ctx.mappings.getIssueByOneDev(issue.project.path, issue.number)
   if (mapping === undefined) return
 
-  ctx.log.info({ msg: 'Issue comment created', issueNumber: issue.number, commentId: comment.id })
-  // TODO: create comment in Huly, store comment mapping
+  const hulyCommentId = await ctx.huly.createComment({
+    workspaceId: mapping.hulyWorkspace,
+    issueId: mapping.hulyIssueId,
+    text: comment.content,
+  })
+
+  ctx.mappings.setComment({
+    onedevCommentId: comment.id,
+    hulyCommentId,
+    hulyWorkspace: mapping.hulyWorkspace,
+  })
+
+  ctx.log.info({ msg: 'Created Huly comment', hulyCommentId, onedevCommentId: comment.id })
 }
 
-async function handleIssueCommentChanged(data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
+async function handleIssueCommentChanged (data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
   const { comment } = data
+
   const mapping = ctx.mappings.getCommentByOneDev(comment.id)
   if (mapping === undefined) return
 
-  // TODO: update Huly comment
+  await ctx.huly.updateComment(mapping.hulyWorkspace, mapping.hulyCommentId, comment.content)
+  ctx.log.info({ msg: 'Updated Huly comment', hulyCommentId: mapping.hulyCommentId })
 }
 
-async function handleIssueCommentDeleted(data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
+async function handleIssueCommentDeleted (data: OneDevIssueCommentEvent, ctx: HandlerContext): Promise<void> {
   const { comment } = data
+
   const mapping = ctx.mappings.getCommentByOneDev(comment.id)
   if (mapping === undefined) return
 
-  // TODO: delete Huly comment, remove mapping
+  await ctx.huly.deleteComment(mapping.hulyWorkspace, mapping.hulyCommentId)
   ctx.mappings.deleteComment(comment.id)
+  ctx.log.info({ msg: 'Deleted Huly comment', hulyCommentId: mapping.hulyCommentId })
 }
 
-async function handlePullRequestEvent(data: OneDevPullRequestEvent, ctx: HandlerContext): Promise<void> {
+// ---------------------------------------------------------------------------
+// Pull request handler
+// ---------------------------------------------------------------------------
+
+async function handlePullRequestEvent (data: OneDevPullRequestEvent, ctx: HandlerContext): Promise<void> {
   const { pullRequest } = data
-  ctx.log.info({ msg: 'Pull request event', project: pullRequest.project.path, number: pullRequest.number, state: pullRequest.state })
-  // TODO: create/update/close PR document in Huly
+
+  const projectConfig = ctx.mappings.getProjectConfig(pullRequest.project.path)
+  if (projectConfig === undefined) return
+
+  ctx.log.info({
+    msg: 'Pull request event',
+    project: pullRequest.project.path,
+    number: pullRequest.number,
+    state: pullRequest.state,
+  })
+
+  // When a PR merges, transition any linked issue to the "done" state if configured.
+  if (pullRequest.state === 'MERGED') {
+    // TODO: resolve the linked OneDev issue from the PR description/title and
+    // transition it — requires parsing OneDev's issue reference syntax.
+    ctx.log.info({ msg: 'PR merged — issue auto-close not yet implemented' })
+  }
+
+  // TODO: create/update a Huly pull request document once model-onedev defines the class.
 }
 
 main().catch((err) => {
