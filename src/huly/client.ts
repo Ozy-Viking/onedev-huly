@@ -248,13 +248,16 @@ export class HulyClient {
 
   /**
    * Poll Huly for changed issues in a project and invoke the callback.
-   * Uses a 30-second polling interval as a pragmatic substitute for
-   * live queries (which require a persistent WebSocket via @hcengineering/client).
+   * Interval is configurable via HULY_POLL_INTERVAL_MS (default 30 000 ms).
+   * A WebSocket live-query path would give sub-second latency but requires
+   * a persistent connection via @hcengineering/client — polling is sufficient
+   * for most deployments.
    */
   async watchIssues (
     workspaceId: string,
     projectId: string,
     callback: (change: HulyIssueChange) => Promise<void>,
+    intervalMs = 30_000,
   ): Promise<void> {
     const pollKey = `${workspaceId}:${projectId}`
     if (this.pollers.has(pollKey)) return
@@ -291,8 +294,8 @@ export class HulyClient {
       }
     }
 
-    this.pollers.set(pollKey, setInterval(() => { void poll() }, 30_000))
-    console.log(`[huly] watching project ${projectId} in workspace ${workspaceId}`)
+    this.pollers.set(pollKey, setInterval(() => { void poll() }, intervalMs))
+    console.log(`[huly] watching project ${projectId} in workspace ${workspaceId} (poll every ${intervalMs}ms)`)
   }
 
   stopWatching (workspaceId: string, projectId: string): void {

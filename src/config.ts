@@ -35,6 +35,10 @@ export interface Config {
 
   // ---- OneDev ----
   onedevWebhookSecret: string
+
+  // ---- Sync behaviour ----
+  /** How often (ms) to poll Huly for outbound changes. Default: 30 000. */
+  hulyPollIntervalMs: number
 }
 
 export function loadConfig(): Config {
@@ -51,5 +55,7 @@ export function loadConfig(): Config {
     frontUrl: required('FRONT_URL'),
 
     onedevWebhookSecret: required('ONEDEV_WEBHOOK_SECRET'),
+
+    hulyPollIntervalMs: parseInt(optional('HULY_POLL_INTERVAL_MS', '30000'), 10),
   }
 }

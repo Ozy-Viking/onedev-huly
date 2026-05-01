@@ -100,6 +100,7 @@ export class Worker {
       projectConfig.hulyWorkspace,
       hulyProjectId,
       (change) => this.handleHulyChange(change),
+      this.config.hulyPollIntervalMs,
     )
   }
 
