@@ -8,48 +8,75 @@
  */
 
 import fetch from 'node-fetch'
-import type { OneDevIssue, OneDevIssueComment, OneDevPullRequest } from './types.js'
+import type { OneDevIssue, OneDevIssueComment, OneDevProject, OneDevPullRequest } from './types.js'
 
 export interface OneDevClientConfig {
   baseUrl: string       // e.g. https://onedev.example.com
   accessToken: string   // personal access token
 }
 
+export interface CreatedIssue {
+  /** OneDev database ID (used for updates, comments, transitions). */
+  id: number
+  /** Project-scoped display number (used for URLs and mapping keys). */
+  number: number
+}
+
 export class OneDevClient {
   private readonly baseUrl: string
   private readonly headers: Record<string, string>
 
-  constructor(config: OneDevClientConfig) {
+  constructor (config: OneDevClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '')
     this.headers = {
-      'Authorization': `Bearer ${config.accessToken}`,
+      Authorization: `Bearer ${config.accessToken}`,
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Projects
+  // ---------------------------------------------------------------------------
+
+  async getProjectByPath (path: string): Promise<OneDevProject> {
+    const list: OneDevProject[] = await this.get(`/~api/projects?query="Path"+is+"${encodeURIComponent(path)}"`)
+    if (list.length === 0) throw new Error(`OneDev project not found: ${path}`)
+    return list[0]
   }
 
   // ---------------------------------------------------------------------------
   // Issues
   // ---------------------------------------------------------------------------
 
-  async getIssue(projectPath: string, issueNumber: number): Promise<OneDevIssue> {
-    return this.get(`/~api/issues?query="Project"+is+"${projectPath}"+and+"Number"+is+"${issueNumber}"`)
-      .then((list: OneDevIssue[]) => {
-        if (list.length === 0) throw new Error(`Issue #${issueNumber} not found in ${projectPath}`)
-        return list[0]
-      })
+  async getIssue (projectPath: string, issueNumber: number): Promise<OneDevIssue> {
+    const list: OneDevIssue[] = await this.get(
+      `/~api/issues?query="Project"+is+"${encodeURIComponent(projectPath)}"+and+"Number"+is+"${issueNumber}"`,
+    )
+    if (list.length === 0) throw new Error(`Issue #${issueNumber} not found in ${projectPath}`)
+    return list[0]
   }
 
-  async createIssue(projectId: number, title: string, description?: string): Promise<number> {
+  async getIssueById (issueId: number): Promise<OneDevIssue> {
+    return this.get(`/~api/issues/${issueId}`)
+  }
+
+  /**
+   * Create an issue and return both its database ID and project-scoped number.
+   * The number is retrieved by fetching the newly created issue.
+   */
+  async createIssue (projectId: number, title: string, description?: string): Promise<CreatedIssue> {
     const body = { projectId, title, description: description ?? '' }
-    return this.post('/~api/issues', body) as Promise<number>
+    const id = await this.post('/~api/issues', body) as number
+    const issue = await this.getIssueById(id)
+    return { id, number: issue.number }
   }
 
-  async updateIssue(issueId: number, title: string, description?: string): Promise<void> {
+  async updateIssue (issueId: number, title: string, description?: string): Promise<void> {
     await this.post(`/~api/issues/${issueId}`, { title, description: description ?? '' })
   }
 
-  async transitionIssue(issueId: number, state: string): Promise<void> {
+  async transitionIssue (issueId: number, state: string): Promise<void> {
     await this.post(`/~api/issues/${issueId}/transitions`, { state })
   }
 
@@ -57,19 +84,19 @@ export class OneDevClient {
   // Issue comments
   // ---------------------------------------------------------------------------
 
-  async getIssueComments(issueId: number): Promise<OneDevIssueComment[]> {
+  async getIssueComments (issueId: number): Promise<OneDevIssueComment[]> {
     return this.get(`/~api/issue-comments?query="Issue"+is+"${issueId}"`)
   }
 
-  async createIssueComment(issueId: number, content: string): Promise<number> {
+  async createIssueComment (issueId: number, content: string): Promise<number> {
     return this.post('/~api/issue-comments', { issueId, content }) as Promise<number>
   }
 
-  async updateIssueComment(commentId: number, content: string): Promise<void> {
+  async updateIssueComment (commentId: number, content: string): Promise<void> {
     await this.post(`/~api/issue-comments/${commentId}`, { content })
   }
 
-  async deleteIssueComment(commentId: number): Promise<void> {
+  async deleteIssueComment (commentId: number): Promise<void> {
     await this.delete(`/~api/issue-comments/${commentId}`)
   }
 
@@ -77,25 +104,25 @@ export class OneDevClient {
   // Pull requests
   // ---------------------------------------------------------------------------
 
-  async getPullRequest(projectPath: string, prNumber: number): Promise<OneDevPullRequest> {
-    return this.get(`/~api/pull-requests?query="Project"+is+"${projectPath}"+and+"Number"+is+"${prNumber}"`)
-      .then((list: OneDevPullRequest[]) => {
-        if (list.length === 0) throw new Error(`PR #${prNumber} not found in ${projectPath}`)
-        return list[0]
-      })
+  async getPullRequest (projectPath: string, prNumber: number): Promise<OneDevPullRequest> {
+    const list: OneDevPullRequest[] = await this.get(
+      `/~api/pull-requests?query="Project"+is+"${encodeURIComponent(projectPath)}"+and+"Number"+is+"${prNumber}"`,
+    )
+    if (list.length === 0) throw new Error(`PR #${prNumber} not found in ${projectPath}`)
+    return list[0]
   }
 
   // ---------------------------------------------------------------------------
   // HTTP helpers
   // ---------------------------------------------------------------------------
 
-  private async get(path: string): Promise<any> {
+  private async get (path: string): Promise<any> {
     const res = await fetch(`${this.baseUrl}${path}`, { headers: this.headers })
     if (!res.ok) throw new Error(`OneDev GET ${path} failed: ${res.status} ${res.statusText}`)
     return res.json()
   }
 
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post (path: string, body: unknown): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: this.headers,
@@ -106,7 +133,7 @@ export class OneDevClient {
     return text === '' ? undefined : JSON.parse(text)
   }
 
-  private async delete(path: string): Promise<void> {
+  private async delete (path: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
       headers: this.headers,

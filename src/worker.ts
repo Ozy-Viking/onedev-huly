@@ -9,18 +9,31 @@
 
 import type { Config } from './config.js'
 import type { HulyClient, HulyIssueChange } from './huly/client.js'
-import type { OneDevClient } from './onedev/client.js'
+import { OneDevClient } from './onedev/client.js'
 import type { MappingStore, ProjectConfig } from './huly/mapping.js'
 
 const BOT_COMMENT_MARKER = '<!-- pod-onedev -->'
 
+interface ProjectEntry {
+  config: ProjectConfig
+  /** OneDev numeric project ID (resolved once at watch-start). */
+  onedevProjectNumericId: number
+  client: OneDevClient
+}
+
 export class Worker {
   private running = false
+
+  /**
+   * Per-project context keyed by the resolved Huly project Ref.
+   * Populated in watchProject; used in handleHulyChange to know which
+   * OneDev project and client to use for a given Huly project.
+   */
+  private readonly projectEntries = new Map<string, ProjectEntry>()
 
   constructor (
     private readonly config: Config,
     private readonly huly: HulyClient,
-    private readonly onedev: OneDevClient,
     private readonly mappings: MappingStore,
   ) {}
 
@@ -58,26 +71,46 @@ export class Worker {
     return this.handleHulyChange(change)
   }
 
+  // --------------------------------------------------------------------------
+  // Private
+  // --------------------------------------------------------------------------
+
   private async watchProject (projectConfig: ProjectConfig): Promise<void> {
-    // Resolve the human-readable identifier to a Huly Ref before polling
-    const projectId = await this.huly.resolveProjectId(
+    const hulyProjectId = await this.huly.resolveProjectId(
       projectConfig.hulyWorkspace,
       projectConfig.hulyProjectIdentifier,
     )
+
+    const client = new OneDevClient({
+      baseUrl: projectConfig.onedevBaseUrl,
+      accessToken: projectConfig.onedevAccessToken,
+    })
+
+    // Resolve the OneDev numeric project ID once up front so we don't have
+    // to look it up on every issue creation.
+    const onedevProject = await client.getProjectByPath(projectConfig.onedevProjectPath)
+
+    this.projectEntries.set(hulyProjectId, {
+      config: projectConfig,
+      onedevProjectNumericId: onedevProject.id,
+      client,
+    })
+
     await this.huly.watchIssues(
       projectConfig.hulyWorkspace,
-      projectId,
+      hulyProjectId,
       (change) => this.handleHulyChange(change),
     )
   }
 
   private async unwatchProject (projectConfig: ProjectConfig): Promise<void> {
     try {
-      const projectId = await this.huly.resolveProjectId(
+      const hulyProjectId = await this.huly.resolveProjectId(
         projectConfig.hulyWorkspace,
         projectConfig.hulyProjectIdentifier,
       )
-      this.huly.stopWatching(projectConfig.hulyWorkspace, projectId)
+      this.huly.stopWatching(projectConfig.hulyWorkspace, hulyProjectId)
+      this.projectEntries.delete(hulyProjectId)
     } catch {
       // Already gone or never resolved — nothing to stop
     }
@@ -87,14 +120,19 @@ export class Worker {
     const mapping = this.mappings.getIssueByHuly(change.issueId)
 
     if (mapping === undefined) {
-      // Issue not mapped to OneDev — could be Huly-only, ignore
+      // No OneDev mapping yet.
+      if (change.type === 'create') {
+        // FR-2.1: new Huly-native issue — create it in OneDev.
+        await this.createOneDevIssueFromHuly(change)
+      }
       return
     }
 
     try {
       switch (change.type) {
+        case 'create':
         case 'update':
-          await this.syncIssueUpdateToOneDev(mapping.onedevIssueId, change)
+          await this.syncIssueUpdateToOneDev(mapping, change)
           break
         case 'delete':
           // Per FR-4.4: don't delete OneDev issues when Huly issues are deleted
@@ -114,17 +152,57 @@ export class Worker {
     }
   }
 
-  private async syncIssueUpdateToOneDev (onedevIssueId: number, change: HulyIssueChange): Promise<void> {
+  private async createOneDevIssueFromHuly (change: HulyIssueChange): Promise<void> {
+    const entry = this.projectEntries.get(change.projectId)
+    if (entry === undefined) {
+      // Project not in our watch map — shouldn't happen, but guard anyway
+      console.warn(`[worker] no project entry for Huly project ${change.projectId}`)
+      return
+    }
+
+    const { config, client, onedevProjectNumericId } = entry
+
+    const created = await client.createIssue(
+      onedevProjectNumericId,
+      change.title ?? '(Untitled)',
+      change.description,
+    )
+
+    const newMapping = {
+      onedevProjectPath: config.onedevProjectPath,
+      onedevIssueNumber: created.number,
+      onedevIssueId: created.id,
+      hulyWorkspace: change.workspaceId,
+      hulyProjectIdentifier: config.hulyProjectIdentifier,
+      hulyIssueId: change.issueId,
+    }
+
+    this.mappings.setIssue(newMapping)
+    this.huly.persistIssueMapping(change.workspaceId, newMapping)
+      .catch((err) => console.error('[worker] failed to persist issue mapping:', err))
+
+    console.log(
+      `[worker] created OneDev issue #${created.number} from Huly issue ${change.issueId}`,
+    )
+  }
+
+  private async syncIssueUpdateToOneDev (
+    mapping: ReturnType<typeof this.mappings.getIssueByHuly> & object,
+    change: HulyIssueChange,
+  ): Promise<void> {
+    const entry = this.projectEntries.get(change.projectId)
+    if (entry === undefined) return
+
     if (change.title !== undefined || change.description !== undefined) {
-      await this.onedev.updateIssue(
-        onedevIssueId,
+      await entry.client.updateIssue(
+        mapping.onedevIssueId,
         change.title ?? '',
         change.description,
       )
     }
 
     if (change.status !== undefined) {
-      await this.onedev.transitionIssue(onedevIssueId, change.status)
+      await entry.client.transitionIssue(mapping.onedevIssueId, change.status)
     }
   }
 

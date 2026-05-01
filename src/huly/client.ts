@@ -62,6 +62,8 @@ export interface HulyCommentCreate {
 export interface HulyIssueChange {
   type: 'create' | 'update' | 'delete'
   workspaceId: string
+  /** Resolved Huly project Ref (e.g. "tracker:project:xxx"). */
+  projectId: string
   issueId: string
   title?: string
   description?: string
@@ -271,9 +273,13 @@ export class HulyClient {
         )
 
         for (const issue of issues) {
+          // An issue whose createdOn falls within this poll window is genuinely
+          // new (not a pre-existing issue that was just edited).
+          const isNew = (issue as any).createdOn != null && (issue as any).createdOn >= since
           await callback({
-            type: 'update',
+            type: isNew ? 'create' : 'update',
             workspaceId,
+            projectId,
             issueId: issue._id,
             title: (issue as any).title,
             description: (issue as any).description,

@@ -14,7 +14,6 @@
 import Fastify, { type FastifyBaseLogger } from 'fastify'
 import { loadConfig } from './config.js'
 import { HulyClient } from './huly/client.js'
-import { OneDevClient } from './onedev/client.js'
 import { MappingStore, type ProjectConfig } from './huly/mapping.js'
 import { Worker } from './worker.js'
 import { verifyWebhook, parseWebhook, WebhookVerificationError } from './onedev/webhooks.js'
@@ -31,19 +30,12 @@ async function main (): Promise<void> {
   const huly = new HulyClient()
   const mappings = new MappingStore()
 
-  // OneDev client factory — creates per-project clients using stored project config.
-  // The default instance below is for health checks; per-event clients come from mappings.
-  const onedev = new OneDevClient({
-    baseUrl: process.env.ONEDEV_BASE_URL ?? 'http://localhost:6610',
-    accessToken: process.env.ONEDEV_ACCESS_TOKEN ?? '',
-  })
-
   // Load project configs from ONEDEV_PROJECTS env var (JSON array of ProjectConfig).
   // This is the bootstrap path for simple deployments. The full UI-driven config
   // (FR-3.1) will come from the Huly settings plugin once model-onedev exists.
   loadProjectConfigsFromEnv(mappings)
 
-  const worker = new Worker(config, huly, onedev, mappings)
+  const worker = new Worker(config, huly, mappings)
 
   // ---------------------------------------------------------------------------
   // Health check
@@ -126,7 +118,7 @@ async function main (): Promise<void> {
     // Acknowledge immediately; process asynchronously (NFR-2.1)
     void reply.code(200).send({ status: 'accepted' })
 
-    handleWebhookEvent(envelope.event, envelope.data, { huly, onedev, mappings, config, log: fastify.log })
+    handleWebhookEvent(envelope.event, envelope.data, { huly, mappings, config, log: fastify.log })
       .catch((err) => fastify.log.error({ msg: 'Webhook processing failed', event: envelope.event, err }))
   })
 
@@ -178,7 +170,6 @@ async function main (): Promise<void> {
 
 interface HandlerContext {
   huly: HulyClient
-  onedev: OneDevClient
   mappings: MappingStore
   config: ReturnType<typeof loadConfig>
   log: FastifyBaseLogger
