@@ -32,8 +32,8 @@ export interface ProjectConfig {
   onedevAccessToken: string
   /** Huly workspace URL slug, e.g. "my-workspace" */
   hulyWorkspace: string
-  /** Huly tracker project Ref, e.g. "tracker:project:ABC" */
-  hulyProjectId: string
+  /** Huly tracker project identifier shown in the UI, e.g. "BACK" */
+  hulyProjectIdentifier: string
   /** Maps OneDev states → Huly status IDs */
   stateMapping: StateMapping[]
 }
@@ -47,7 +47,7 @@ export interface IssueMapping {
   onedevIssueNumber: number
   onedevIssueId: number
   hulyWorkspace: string
-  hulyProjectId: string
+  hulyProjectIdentifier: string
   hulyIssueId: string   // Ref<tracker.class.Issue>
 }
 

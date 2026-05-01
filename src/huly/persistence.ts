@@ -41,7 +41,7 @@ export async function loadIssueMappings (ops: TxOperations): Promise<IssueMappin
     onedevIssueNumber: d.onedevIssueNumber,
     onedevIssueId: d.onedevIssueId,
     hulyWorkspace: d.hulyWorkspace,
-    hulyProjectId: d.hulyProjectId,
+    hulyProjectIdentifier: d.hulyProjectIdentifier,
     hulyIssueId: d.hulyIssueId,
   }))
 }

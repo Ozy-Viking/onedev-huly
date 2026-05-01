@@ -10,7 +10,7 @@
 import type { Config } from './config.js'
 import type { HulyClient, HulyIssueChange } from './huly/client.js'
 import type { OneDevClient } from './onedev/client.js'
-import type { MappingStore } from './huly/mapping.js'
+import type { MappingStore, ProjectConfig } from './huly/mapping.js'
 
 const BOT_COMMENT_MARKER = '<!-- pod-onedev -->'
 
@@ -28,39 +28,59 @@ export class Worker {
     this.running = true
     console.log('[worker] started, watching Huly change feed')
 
-    // Start polling for each configured project mapping
     for (const projectConfig of this.mappings.listProjectConfigs()) {
-      await this.huly.watchIssues(
-        projectConfig.hulyWorkspace,
-        projectConfig.hulyProjectId,
-        (change) => this.handleHulyChange(change),
-      )
+      await this.watchProject(projectConfig)
     }
   }
 
   async stop (): Promise<void> {
     this.running = false
 
-    // Cancel all pollers
     for (const projectConfig of this.mappings.listProjectConfigs()) {
-      this.huly.stopWatching(projectConfig.hulyWorkspace, projectConfig.hulyProjectId)
+      await this.unwatchProject(projectConfig)
     }
 
     console.log('[worker] stopped')
   }
 
   /** Add a new project mapping at runtime (called when /projects POST fires). */
-  async addProject (projectConfig: import('./huly/mapping.js').ProjectConfig): Promise<void> {
-    await this.huly.watchIssues(
-      projectConfig.hulyWorkspace,
-      projectConfig.hulyProjectId,
-      (change) => this.handleHulyChange(change),
-    )
+  async addProject (projectConfig: ProjectConfig): Promise<void> {
+    await this.watchProject(projectConfig)
+  }
+
+  /** Remove a project mapping at runtime (called when /projects DELETE fires). */
+  async removeProject (projectConfig: ProjectConfig): Promise<void> {
+    await this.unwatchProject(projectConfig)
   }
 
   /** Public entry for external callers (e.g. tests). */
   async handleChange (change: HulyIssueChange): Promise<void> {
     return this.handleHulyChange(change)
+  }
+
+  private async watchProject (projectConfig: ProjectConfig): Promise<void> {
+    // Resolve the human-readable identifier to a Huly Ref before polling
+    const projectId = await this.huly.resolveProjectId(
+      projectConfig.hulyWorkspace,
+      projectConfig.hulyProjectIdentifier,
+    )
+    await this.huly.watchIssues(
+      projectConfig.hulyWorkspace,
+      projectId,
+      (change) => this.handleHulyChange(change),
+    )
+  }
+
+  private async unwatchProject (projectConfig: ProjectConfig): Promise<void> {
+    try {
+      const projectId = await this.huly.resolveProjectId(
+        projectConfig.hulyWorkspace,
+        projectConfig.hulyProjectIdentifier,
+      )
+      this.huly.stopWatching(projectConfig.hulyWorkspace, projectId)
+    } catch {
+      // Already gone or never resolved — nothing to stop
+    }
   }
 
   private async handleHulyChange (change: HulyIssueChange): Promise<void> {

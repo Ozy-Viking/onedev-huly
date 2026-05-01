@@ -23,4 +23,9 @@ ENV NODE_ENV=production
 
 EXPOSE 3600
 
+# Management CLI — run with:
+#   docker exec <container> node dist/cli.js <command>
+# or via docker-compose:
+#   docker compose exec onedev node dist/cli.js list
+
 CMD ["node", "dist/main.js"]

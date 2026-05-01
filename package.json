@@ -9,6 +9,7 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "dev": "ts-node src/main.ts",
+    "cli": "ts-node src/cli.ts",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "docker:build": "docker build -t pod-onedev .",

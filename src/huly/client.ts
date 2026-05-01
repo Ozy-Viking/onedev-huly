@@ -40,7 +40,8 @@ const CHUNTER_CHAT_MESSAGE = 'chunter:class:ChatMessage' as unknown as Ref<Class
 
 export interface HulyIssueCreate {
   workspaceId: string
-  projectId: string   // Ref<tracker.class.Project>
+  /** Human-readable project identifier shown in the Huly UI, e.g. "BACK". */
+  projectIdentifier: string
   title: string
   description?: string
   externalUrl?: string  // link back to OneDev issue
@@ -79,7 +80,10 @@ export class HulyClient {
   /** Per-workspace TxOperations, keyed by workspace URL slug. */
   private readonly clients = new Map<string, TxOperations>()
 
-  /** Polling timers for watchIssues, keyed by projectId. */
+  /** Resolved project identifier → Ref cache, keyed by `${workspace}:${identifier}`. */
+  private readonly projectIdCache = new Map<string, string>()
+
+  /** Polling timers for watchIssues, keyed by `${workspace}:${projectId}`. */
   private readonly pollers = new Map<string, ReturnType<typeof setInterval>>()
 
   // --------------------------------------------------------------------------
@@ -140,11 +144,12 @@ export class HulyClient {
 
   async createIssue (data: HulyIssueCreate): Promise<string> {
     const ops = await this.getOps(data.workspaceId)
+    const projectId = await this.resolveProjectId(data.workspaceId, data.projectIdentifier)
     const id = generateId()
 
     await ops.createDoc(
       TRACKER_ISSUE,
-      data.projectId as unknown as Ref<Space>,
+      projectId as unknown as Ref<Space>,
       {
         title: data.title,
         description: data.description ?? '',
@@ -297,14 +302,23 @@ export class HulyClient {
   // Projects
   // --------------------------------------------------------------------------
 
-  /** Find a Huly tracker project by its identifier within a workspace. */
-  async findProject (workspaceId: string, identifier: string): Promise<string | undefined> {
+  /**
+   * Resolve a human-readable project identifier (e.g. "BACK") to its internal
+   * Huly Ref string. Result is cached for the lifetime of the client.
+   */
+  async resolveProjectId (workspaceId: string, identifier: string): Promise<string> {
+    const cacheKey = `${workspaceId}:${identifier}`
+    const cached = this.projectIdCache.get(cacheKey)
+    if (cached !== undefined) return cached
+
     const ops = await this.getOps(workspaceId)
-    const project = await ops.findOne(
-      TRACKER_PROJECT,
-      { identifier } as any,
-    )
-    return project?._id
+    const project = await ops.findOne(TRACKER_PROJECT, { identifier } as any)
+    if (project === undefined) {
+      throw new Error(`Huly project "${identifier}" not found in workspace "${workspaceId}"`)
+    }
+
+    this.projectIdCache.set(cacheKey, project._id)
+    return project._id
   }
 
   // --------------------------------------------------------------------------

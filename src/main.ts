@@ -66,7 +66,7 @@ async function main (): Promise<void> {
       onedevProjectPath: p.onedevProjectPath,
       onedevBaseUrl: p.onedevBaseUrl,
       hulyWorkspace: p.hulyWorkspace,
-      hulyProjectId: p.hulyProjectId,
+      hulyProjectIdentifier: p.hulyProjectIdentifier,
       stateMappingCount: p.stateMapping.length,
     }))
   })
@@ -78,7 +78,7 @@ async function main (): Promise<void> {
       typeof body?.onedevBaseUrl !== 'string' ||
       typeof body?.onedevAccessToken !== 'string' ||
       typeof body?.hulyWorkspace !== 'string' ||
-      typeof body?.hulyProjectId !== 'string'
+      typeof body?.hulyProjectIdentifier !== 'string'
     ) {
       return reply.code(400).send({ error: 'Invalid project config' })
     }
@@ -96,7 +96,7 @@ async function main (): Promise<void> {
     if (existing === undefined) {
       return reply.code(404).send({ error: 'Project not found' })
     }
-    huly.stopWatching(existing.hulyWorkspace, existing.hulyProjectId)
+    await worker.removeProject(existing)
     mappings.deleteProjectConfig(projectPath)
     fastify.log.info({ msg: 'Project config removed', path: projectPath })
     return { status: 'ok' }
@@ -235,7 +235,7 @@ async function handleIssueOpened (data: OneDevIssueEvent, ctx: HandlerContext): 
 
   const hulyIssueId = await ctx.huly.createIssue({
     workspaceId: projectConfig.hulyWorkspace,
-    projectId: projectConfig.hulyProjectId,
+    projectIdentifier: projectConfig.hulyProjectIdentifier,
     title: issue.title,
     description: issue.description,
     externalUrl: onedevUrl,
@@ -246,7 +246,7 @@ async function handleIssueOpened (data: OneDevIssueEvent, ctx: HandlerContext): 
     onedevIssueNumber: issue.number,
     onedevIssueId: issue.id,
     hulyWorkspace: projectConfig.hulyWorkspace,
-    hulyProjectId: projectConfig.hulyProjectId,
+    hulyProjectIdentifier: projectConfig.hulyProjectIdentifier,
     hulyIssueId,
   }
   ctx.mappings.setIssue(issueMapping)
@@ -366,7 +366,7 @@ async function handlePullRequestEvent (data: OneDevPullRequestEvent, ctx: Handle
  * Seed project configs from the ONEDEV_PROJECTS environment variable.
  * Value must be a JSON array of ProjectConfig objects.
  * Example:
- *   ONEDEV_PROJECTS='[{"onedevProjectPath":"acme/backend","onedevBaseUrl":"https://onedev.example.com","onedevAccessToken":"tok","hulyWorkspace":"my-ws","hulyProjectId":"tracker:project:ABC","stateMapping":[]}]'
+ *   ONEDEV_PROJECTS='[{"onedevProjectPath":"acme/backend","onedevBaseUrl":"https://onedev.example.com","onedevAccessToken":"tok","hulyWorkspace":"my-ws","hulyProjectIdentifier":"BACK","stateMapping":[]}]'
  */
 function loadProjectConfigsFromEnv (store: MappingStore): void {
   const raw = process.env.ONEDEV_PROJECTS
@@ -382,7 +382,7 @@ function loadProjectConfigsFromEnv (store: MappingStore): void {
 
   for (const c of configs) {
     store.setProjectConfig(c)
-    console.log(`[config] Loaded project config: ${c.onedevProjectPath} → ${c.hulyWorkspace}/${c.hulyProjectId}`)
+    console.log(`[config] Loaded project config: ${c.onedevProjectPath} → ${c.hulyWorkspace}/${c.hulyProjectIdentifier}`)
   }
 }
 
