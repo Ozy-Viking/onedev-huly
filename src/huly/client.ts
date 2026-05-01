@@ -12,6 +12,17 @@ import { getWorkspaceToken, createRestTxOperations } from '@hcengineering/api-cl
 import type { ServerConfig } from '@hcengineering/api-client'
 import { generateId } from '@hcengineering/core'
 import type { Ref, Class, Doc, AttachedDoc, Space, TxOperations } from '@hcengineering/core'
+import {
+  loadIssueMappings,
+  loadCommentMappings,
+  loadPullRequestMappings,
+  saveIssueMapping,
+  saveCommentMapping,
+  savePullRequestMapping,
+  deleteIssueMappingDoc,
+  deleteCommentMappingDoc,
+} from './persistence.js'
+import type { IssueMapping, CommentMapping, PullRequestMapping, MappingStore } from './mapping.js'
 
 // ---------------------------------------------------------------------------
 // Tracker class IDs
@@ -294,5 +305,62 @@ export class HulyClient {
       { identifier } as any,
     )
     return project?._id
+  }
+
+  // --------------------------------------------------------------------------
+  // Persistence: load all stored mappings for a workspace into the store
+  // --------------------------------------------------------------------------
+
+  /**
+   * Load persisted OneDev↔Huly mappings from the Huly transactor into the
+   * given MappingStore. Call once at startup for each connected workspace.
+   */
+  async loadMappingsForWorkspace (workspaceId: string, store: MappingStore): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+
+    const [issues, comments, prs] = await Promise.all([
+      loadIssueMappings(ops),
+      loadCommentMappings(ops),
+      loadPullRequestMappings(ops),
+    ])
+
+    for (const m of issues) store.setIssue(m)
+    for (const m of comments) store.setComment(m)
+    for (const m of prs) store.setPullRequest(m)
+
+    console.log(`[huly] loaded ${issues.length} issue, ${comments.length} comment, ${prs.length} PR mappings for workspace ${workspaceId}`)
+  }
+
+  // --------------------------------------------------------------------------
+  // Persistence: per-mutation save/delete (called from webhook handlers)
+  // --------------------------------------------------------------------------
+
+  async persistIssueMapping (workspaceId: string, mapping: IssueMapping): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+    await saveIssueMapping(ops, mapping)
+  }
+
+  async persistCommentMapping (workspaceId: string, mapping: CommentMapping): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+    await saveCommentMapping(ops, mapping)
+  }
+
+  async persistPullRequestMapping (workspaceId: string, mapping: PullRequestMapping): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+    await savePullRequestMapping(ops, mapping)
+  }
+
+  async removePersistentIssueMapping (
+    workspaceId: string,
+    onedevProjectPath: string,
+    onedevIssueNumber: number,
+  ): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+    await deleteIssueMappingDoc(ops, onedevProjectPath, onedevIssueNumber)
+  }
+
+  async removePersistentCommentMapping (workspaceId: string, onedevCommentId: number): Promise<void> {
+    const ops = await this.getOps(workspaceId)
+    await deleteCommentMappingDoc(ops, onedevCommentId)
   }
 }

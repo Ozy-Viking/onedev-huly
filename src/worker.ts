@@ -49,6 +49,20 @@ export class Worker {
     console.log('[worker] stopped')
   }
 
+  /** Add a new project mapping at runtime (called when /projects POST fires). */
+  async addProject (projectConfig: import('./huly/mapping.js').ProjectConfig): Promise<void> {
+    await this.huly.watchIssues(
+      projectConfig.hulyWorkspace,
+      projectConfig.hulyProjectId,
+      (change) => this.handleHulyChange(change),
+    )
+  }
+
+  /** Public entry for external callers (e.g. tests). */
+  async handleChange (change: HulyIssueChange): Promise<void> {
+    return this.handleHulyChange(change)
+  }
+
   private async handleHulyChange (change: HulyIssueChange): Promise<void> {
     const mapping = this.mappings.getIssueByHuly(change.issueId)
 
@@ -65,6 +79,11 @@ export class Worker {
         case 'delete':
           // Per FR-4.4: don't delete OneDev issues when Huly issues are deleted
           this.mappings.deleteIssue(mapping.onedevProjectPath, mapping.onedevIssueNumber)
+          this.huly.removePersistentIssueMapping(
+            mapping.hulyWorkspace,
+            mapping.onedevProjectPath,
+            mapping.onedevIssueNumber,
+          ).catch((err) => console.error('[worker] failed to remove persistent issue mapping:', err))
           break
         default:
           break

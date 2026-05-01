@@ -15,7 +15,7 @@ import Fastify, { type FastifyBaseLogger } from 'fastify'
 import { loadConfig } from './config.js'
 import { HulyClient } from './huly/client.js'
 import { OneDevClient } from './onedev/client.js'
-import { MappingStore } from './huly/mapping.js'
+import { MappingStore, type ProjectConfig } from './huly/mapping.js'
 import { Worker } from './worker.js'
 import { verifyWebhook, parseWebhook, WebhookVerificationError } from './onedev/webhooks.js'
 import type {
@@ -38,6 +38,11 @@ async function main (): Promise<void> {
     accessToken: process.env.ONEDEV_ACCESS_TOKEN ?? '',
   })
 
+  // Load project configs from ONEDEV_PROJECTS env var (JSON array of ProjectConfig).
+  // This is the bootstrap path for simple deployments. The full UI-driven config
+  // (FR-3.1) will come from the Huly settings plugin once model-onedev exists.
+  loadProjectConfigsFromEnv(mappings)
+
   const worker = new Worker(config, huly, onedev, mappings)
 
   // ---------------------------------------------------------------------------
@@ -50,6 +55,51 @@ async function main (): Promise<void> {
       service: config.serviceId,
       connected: huly.isConnected(),
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // Project config management API (internal — not exposed to the internet)
+  // ---------------------------------------------------------------------------
+
+  fastify.get('/projects', async () => {
+    return mappings.listProjectConfigs().map((p) => ({
+      onedevProjectPath: p.onedevProjectPath,
+      onedevBaseUrl: p.onedevBaseUrl,
+      hulyWorkspace: p.hulyWorkspace,
+      hulyProjectId: p.hulyProjectId,
+      stateMappingCount: p.stateMapping.length,
+    }))
+  })
+
+  fastify.post('/projects', async (request, reply) => {
+    const body = request.body as ProjectConfig
+    if (
+      typeof body?.onedevProjectPath !== 'string' ||
+      typeof body?.onedevBaseUrl !== 'string' ||
+      typeof body?.onedevAccessToken !== 'string' ||
+      typeof body?.hulyWorkspace !== 'string' ||
+      typeof body?.hulyProjectId !== 'string'
+    ) {
+      return reply.code(400).send({ error: 'Invalid project config' })
+    }
+
+    mappings.setProjectConfig(body)
+    await worker.addProject(body)
+    fastify.log.info({ msg: 'Project config registered', path: body.onedevProjectPath })
+    return reply.code(201).send({ status: 'ok' })
+  })
+
+  fastify.delete('/projects/:path', async (request, reply) => {
+    const { path } = request.params as { path: string }
+    const projectPath = decodeURIComponent(path)
+    const existing = mappings.getProjectConfig(projectPath)
+    if (existing === undefined) {
+      return reply.code(404).send({ error: 'Project not found' })
+    }
+    huly.stopWatching(existing.hulyWorkspace, existing.hulyProjectId)
+    mappings.deleteProjectConfig(projectPath)
+    fastify.log.info({ msg: 'Project config removed', path: projectPath })
+    return { status: 'ok' }
   })
 
   // ---------------------------------------------------------------------------
@@ -86,6 +136,13 @@ async function main (): Promise<void> {
 
   try {
     await huly.connect(config.accountsUrl, config.serverSecret)
+
+    // Load persisted mappings for each configured workspace
+    const workspaces = [...new Set(mappings.listProjectConfigs().map((p) => p.hulyWorkspace))]
+    for (const ws of workspaces) {
+      await huly.loadMappingsForWorkspace(ws, mappings)
+    }
+
     await worker.start()
   } catch (err) {
     fastify.log.error({ msg: 'Failed to connect to Huly', err })
@@ -184,14 +241,17 @@ async function handleIssueOpened (data: OneDevIssueEvent, ctx: HandlerContext): 
     externalUrl: onedevUrl,
   })
 
-  ctx.mappings.setIssue({
+  const issueMapping = {
     onedevProjectPath: issue.project.path,
     onedevIssueNumber: issue.number,
     onedevIssueId: issue.id,
     hulyWorkspace: projectConfig.hulyWorkspace,
     hulyProjectId: projectConfig.hulyProjectId,
     hulyIssueId,
-  })
+  }
+  ctx.mappings.setIssue(issueMapping)
+  ctx.huly.persistIssueMapping(projectConfig.hulyWorkspace, issueMapping)
+    .catch((err) => ctx.log.error({ msg: 'Failed to persist issue mapping', err }))
 
   ctx.log.info({ msg: 'Created Huly issue', hulyIssueId, project: issue.project.path, number: issue.number })
 }
@@ -236,11 +296,14 @@ async function handleIssueCommentCreated (data: OneDevIssueCommentEvent, ctx: Ha
     text: comment.content,
   })
 
-  ctx.mappings.setComment({
+  const commentMapping = {
     onedevCommentId: comment.id,
     hulyCommentId,
     hulyWorkspace: mapping.hulyWorkspace,
-  })
+  }
+  ctx.mappings.setComment(commentMapping)
+  ctx.huly.persistCommentMapping(mapping.hulyWorkspace, commentMapping)
+    .catch((err) => ctx.log.error({ msg: 'Failed to persist comment mapping', err }))
 
   ctx.log.info({ msg: 'Created Huly comment', hulyCommentId, onedevCommentId: comment.id })
 }
@@ -263,6 +326,8 @@ async function handleIssueCommentDeleted (data: OneDevIssueCommentEvent, ctx: Ha
 
   await ctx.huly.deleteComment(mapping.hulyWorkspace, mapping.hulyCommentId)
   ctx.mappings.deleteComment(comment.id)
+  ctx.huly.removePersistentCommentMapping(mapping.hulyWorkspace, comment.id)
+    .catch((err) => ctx.log.error({ msg: 'Failed to remove comment mapping', err }))
   ctx.log.info({ msg: 'Deleted Huly comment', hulyCommentId: mapping.hulyCommentId })
 }
 
@@ -291,6 +356,34 @@ async function handlePullRequestEvent (data: OneDevPullRequestEvent, ctx: Handle
   }
 
   // TODO: create/update a Huly pull request document once model-onedev defines the class.
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed project configs from the ONEDEV_PROJECTS environment variable.
+ * Value must be a JSON array of ProjectConfig objects.
+ * Example:
+ *   ONEDEV_PROJECTS='[{"onedevProjectPath":"acme/backend","onedevBaseUrl":"https://onedev.example.com","onedevAccessToken":"tok","hulyWorkspace":"my-ws","hulyProjectId":"tracker:project:ABC","stateMapping":[]}]'
+ */
+function loadProjectConfigsFromEnv (store: MappingStore): void {
+  const raw = process.env.ONEDEV_PROJECTS
+  if (raw === undefined || raw === '') return
+
+  let configs: ProjectConfig[]
+  try {
+    configs = JSON.parse(raw) as ProjectConfig[]
+  } catch {
+    console.error('[config] Failed to parse ONEDEV_PROJECTS — must be a JSON array')
+    return
+  }
+
+  for (const c of configs) {
+    store.setProjectConfig(c)
+    console.log(`[config] Loaded project config: ${c.onedevProjectPath} → ${c.hulyWorkspace}/${c.hulyProjectId}`)
+  }
 }
 
 main().catch((err) => {
