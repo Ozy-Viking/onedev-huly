@@ -1,0 +1,33 @@
+version: '3.8'
+
+# Local development compose for pod-onedev.
+# Points at your existing self-hosted Huly stack.
+# Assumes Huly services are reachable on the huly_net Docker network.
+
+services:
+  onedev:
+    build: .
+    ports:
+      - "3600:3600"
+    environment:
+      - PORT=3600
+      - SERVICE_ID=onedev-service
+      # Huly internals — match your huly_v7.conf values
+      - SERVER_SECRET=${SECRET}
+      - ACCOUNTS_URL=http://account:3000
+      - STATS_URL=http://stats:4900
+      - STORAGE_CONFIG=minio|minio?accessKey=minioadmin&secretKey=minioadmin
+      - COLLABORATOR_URL=ws://${HOST_ADDRESS}/_collaborator
+      - FRONT_URL=http://${HOST_ADDRESS}
+      # OneDev
+      - ONEDEV_WEBHOOK_SECRET=${ONEDEV_WEBHOOK_SECRET}
+      - ONEDEV_BASE_URL=${ONEDEV_BASE_URL}
+      - ONEDEV_ACCESS_TOKEN=${ONEDEV_ACCESS_TOKEN}
+    restart: unless-stopped
+    networks:
+      - huly_net
+
+networks:
+  huly_net:
+    external: true
+    name: huly_net

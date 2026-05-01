@@ -1,0 +1,32 @@
+{
+  "name": "@hcengineering/pod-onedev",
+  "version": "0.1.0",
+  "description": "OneDev ↔ Huly bridge service",
+  "license": "EPL-2.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "dev": "ts-node src/main.ts",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "docker:build": "docker build -t pod-onedev .",
+    "docker:run": "docker run --env-file .env pod-onedev"
+  },
+  "dependencies": {
+    "@hcengineering/api-client": "*",
+    "@hcengineering/core": "*",
+    "@hcengineering/tracker": "*",
+    "fastify": "^4.28.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
