@@ -3,11 +3,8 @@
  *
  * Outbound sync: Huly → OneDev.
  *
- * Watches the Huly transactor change feed for issues in mapped projects
- * and reflects changes back to OneDev via REST API.
- *
- * This is the counterpart to main.ts (inbound webhooks).
- * Mirrors the worker.ts pattern used in pod-github.
+ * Watches the Huly change feed for issues in mapped projects and
+ * reflects changes back to OneDev via REST API.
  */
 
 import type { Config } from './config.js'
@@ -20,35 +17,57 @@ const BOT_COMMENT_MARKER = '<!-- pod-onedev -->'
 export class Worker {
   private running = false
 
-  constructor(
+  constructor (
     private readonly config: Config,
     private readonly huly: HulyClient,
     private readonly onedev: OneDevClient,
     private readonly mappings: MappingStore,
   ) {}
 
-  async start(): Promise<void> {
+  async start (): Promise<void> {
     this.running = true
     console.log('[worker] started, watching Huly change feed')
 
-    // TODO: Replace with real project IDs from configuration/mapping store
-    const watchedProjects: string[] = []
-
-    for (const projectId of watchedProjects) {
-      await this.huly.watchIssues(projectId, (change) => this.handleHulyChange(change))
+    // Start polling for each configured project mapping
+    for (const projectConfig of this.mappings.listProjectConfigs()) {
+      await this.huly.watchIssues(
+        projectConfig.hulyWorkspace,
+        projectConfig.hulyProjectId,
+        (change) => this.handleHulyChange(change),
+      )
     }
   }
 
-  async stop(): Promise<void> {
+  async stop (): Promise<void> {
     this.running = false
+
+    // Cancel all pollers
+    for (const projectConfig of this.mappings.listProjectConfigs()) {
+      this.huly.stopWatching(projectConfig.hulyWorkspace, projectConfig.hulyProjectId)
+    }
+
     console.log('[worker] stopped')
   }
 
-  private async handleHulyChange(change: HulyIssueChange): Promise<void> {
+  /** Add a new project mapping at runtime (called when /projects POST fires). */
+  async addProject (projectConfig: import('./huly/mapping.js').ProjectConfig): Promise<void> {
+    await this.huly.watchIssues(
+      projectConfig.hulyWorkspace,
+      projectConfig.hulyProjectId,
+      (change) => this.handleHulyChange(change),
+    )
+  }
+
+  /** Public entry for external callers (e.g. tests). */
+  async handleChange (change: HulyIssueChange): Promise<void> {
+    return this.handleHulyChange(change)
+  }
+
+  private async handleHulyChange (change: HulyIssueChange): Promise<void> {
     const mapping = this.mappings.getIssueByHuly(change.issueId)
 
     if (mapping === undefined) {
-      // Issue not mapped to OneDev — could be a Huly-only issue, ignore
+      // Issue not mapped to OneDev — could be Huly-only, ignore
       return
     }
 
@@ -58,8 +77,13 @@ export class Worker {
           await this.syncIssueUpdateToOneDev(mapping.onedevIssueId, change)
           break
         case 'delete':
-          // We don't delete OneDev issues when Huly issues are deleted (per FR-4.4)
+          // Per FR-4.4: don't delete OneDev issues when Huly issues are deleted
           this.mappings.deleteIssue(mapping.onedevProjectPath, mapping.onedevIssueNumber)
+          this.huly.removePersistentIssueMapping(
+            mapping.hulyWorkspace,
+            mapping.onedevProjectPath,
+            mapping.onedevIssueNumber,
+          ).catch((err) => console.error('[worker] failed to remove persistent issue mapping:', err))
           break
         default:
           break
@@ -70,7 +94,7 @@ export class Worker {
     }
   }
 
-  private async syncIssueUpdateToOneDev(onedevIssueId: number, change: HulyIssueChange): Promise<void> {
+  private async syncIssueUpdateToOneDev (onedevIssueId: number, change: HulyIssueChange): Promise<void> {
     if (change.title !== undefined || change.description !== undefined) {
       await this.onedev.updateIssue(
         onedevIssueId,
@@ -84,18 +108,11 @@ export class Worker {
     }
   }
 
-  /**
-   * Checks whether a comment was originally posted by this service,
-   * preventing sync loops.
-   */
-  isOwnComment(content: string): boolean {
+  isOwnComment (content: string): boolean {
     return content.includes(BOT_COMMENT_MARKER)
   }
 
-  /**
-   * Wraps comment content with the bot marker so we can detect it later.
-   */
-  markComment(content: string): string {
+  markComment (content: string): string {
     return `${content}\n\n${BOT_COMMENT_MARKER}`
   }
 }

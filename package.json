@@ -15,10 +15,9 @@
     "docker:run": "docker run --env-file .env pod-onedev"
   },
   "dependencies": {
-    "@hcengineering/api-client": "*",
-    "@hcengineering/core": "*",
-    "@hcengineering/tracker": "*",
-    "fastify": "^4.28.0",
+    "@hcengineering/api-client": "^0.7.413",
+    "@hcengineering/core": "^0.7.413",
+    "fastify": "^5.8.5",
     "node-fetch": "^3.3.2"
   },
   "devDependencies": {
@@ -28,5 +27,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "@hcengineering/time": "0.7.0"
   }
 }
